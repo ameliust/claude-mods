@@ -1,0 +1,5 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "ameliust" },
+  "plugins": [{ "name": "recent-chats", "source": "./recent-chats" }]
+}

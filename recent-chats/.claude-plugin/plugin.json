@@ -1,0 +1,1 @@
+{"name": "recent-chats", "version": "0.1.0", "description": "Gives Claude an ambient one-line-per-chat sense of your other recently active conversations", "types": "./types/index.d.ts"}
