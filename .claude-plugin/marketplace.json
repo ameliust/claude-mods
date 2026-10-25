@@ -1,5 +1,16 @@
 {
   "name": "claude-mods",
-  "owner": { "name": "ameliust" },
-  "plugins": [{ "name": "recent-chats", "source": "./recent-chats" }]
+  "owner": {
+    "name": "ameliust"
+  },
+  "plugins": [
+    {
+      "name": "recent-chats",
+      "source": "./recent-chats"
+    },
+    {
+      "name": "cc-redacted",
+      "source": "./cc-redacted"
+    }
+  ]
 }

@@ -1,0 +1,43 @@
+{
+  "name": "cc-redacted",
+  "version": "0.1.0",
+  "description": "Takes identifying details out of what Claude is sent (email, environment, model, memory paths, chosen sections and reminders, literal strings), for experiment runs that need a clean context",
+  "userConfig": {
+    "dropContext": {
+      "type": "string",
+      "title": "Context blocks to leave out",
+      "description": "Comma-separated names of first-message context blocks: userEmail, claudeMd, attachedProject, currentDate",
+      "default": "userEmail,claudeMd,attachedProject,currentDate"
+    },
+    "dropSections": {
+      "type": "string",
+      "title": "System prompt sections to leave out",
+      "description": "Comma-separated section ids, such as env_info, env_info_simple, memory, total_tokens",
+      "default": "env_info,env_info_simple,memory"
+    },
+    "dropReminders": {
+      "type": "string",
+      "title": "Reminder types to leave out",
+      "description": "Comma-separated attachment types, such as environment, model, date, remote_session_change (the commit attribution, which names the model), total_tokens_reminder",
+      "default": "environment,model,date,remote_session_change"
+    },
+    "scrub": {
+      "type": "string",
+      "title": "Literal replacements",
+      "description": "find=>replace pairs separated by |, applied to every section, context block, reminder and tool description that is still sent",
+      "default": ""
+    },
+    "autoScrub": {
+      "type": "boolean",
+      "title": "Scrub home folder, user name and email",
+      "description": "Also replace the home folder with ~, the account user name with 'user' and the email with user@example.com wherever they still appear",
+      "default": true
+    },
+    "auditFile": {
+      "type": "string",
+      "title": "Audit file",
+      "description": "Absolute path of a file listing everything this mod left out or replaced; empty means none",
+      "default": ""
+    }
+  }
+}
