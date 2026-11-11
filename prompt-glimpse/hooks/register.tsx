@@ -41,15 +41,42 @@ const TITLES: Record<Group, string> = {
   turns: 'Turns',
 }
 
+// Row keys stay short: every key in the pane's tree counts toward the 100,000
+// characters a drawing may carry, and keys that held whole reminder texts used
+// that up, so rows past the first were left out and the pane stopped working.
+const hash = (s: string) => {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193)
+  return `${(h >>> 0).toString(16)}.${s.length}`
+}
 const fileSafe = (s: string) => s.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 60)
 const now = () => new Date().toISOString()
 const clock = (iso: string) => iso.slice(11, 19)
 // A rough size: about four characters to a token for English prose and code.
 const tokens = (chars: number) =>
   chars < 4000 ? `~${Math.max(1, Math.round(chars / 4))} tok` : `~${(chars / 4000).toFixed(1)}k tok`
-const bar = (part: number, whole: number) => {
-  const n = whole > 0 ? Math.max(part > 0 ? 1 : 0, Math.round((part / whole) * 8)) : 0
-  return '█'.repeat(n) + '·'.repeat(8 - n)
+// A fixed log scale, so a row's bar means the same in every tab and one huge
+// row does not flatten the rest: one cell from 1 token, then 20, 100, 500, 2.5k.
+const BAR_STEPS = [1, 20, 100, 500, 2500]
+const bar = (chars: number) => {
+  const tok = chars / 4
+  const n = BAR_STEPS.filter(s => tok >= s).length
+  return '█'.repeat(n) + '·'.repeat(BAR_STEPS.length - n)
+}
+// The quiet part of a row's line. Older stored rows carried their size, the
+// default "engine" origin and a full agent id in it; the row now shows the
+// size itself, so those are trimmed here as well as no longer written.
+const tidy = (meta: string) =>
+  meta
+    .split(' · ')
+    .filter(p => p !== 'engine' && !/^~[\d.]+k? tok$/.test(p))
+    .map(p => p.replace(/^agent (\w{4})\w*$/, 'agent $1'))
+    .join(' · ')
+const agentTag = (agentId: string | undefined) => (agentId ? `agent ${agentId.slice(0, 4)}` : '')
+// A one-line peek at a text, to tell versions of one reminder apart.
+const peek = (text: string) => {
+  const flat = text.replace(/<\/?[\w-]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  return flat.length > 60 ? `${flat.slice(0, 59)}…` : flat || '(empty)'
 }
 
 // ---- provenance: who changed what beneath us -------------------------------
@@ -60,10 +87,7 @@ type Provenance = { tags: Map<string, string[]>; removed: { key: string; text: s
 
 // next.trace lists the links beneath a hook nearest first, the engine last;
 // turned around, each layer is what one link handed up.
-function layersOf<O>(
-  trace: readonly { plugin: string; returned: O | undefined }[],
-  items: (o: O) => Item[],
-): Layer[] {
+function layersOf<O>(trace: readonly { plugin: string; returned: O | undefined }[], items: (o: O) => Item[]): Layer[] {
   const layers: Layer[] = []
   for (const t of [...trace].reverse()) {
     if (t.returned === undefined) continue
@@ -128,7 +152,7 @@ function buildVersion(
   const removed: Entry[] = prov.removed.map(r => ({
     key: `${group}:${r.key}`,
     label: r.key,
-    meta: tokens(r.text.length),
+    meta: '',
     text: r.text,
     at,
     lastAt: at,
@@ -148,13 +172,15 @@ function buildVersion(
   return [...fresh, ...removed, ...dropped]
 }
 
-// A line diff (longest common subsequence), cut to the changed lines and two
-// lines of context around each.
-type DiffLine = { sign: ' ' | '+' | '-' | '…'; line: string }
+// A unified diff (longest common subsequence over lines), as hunks with two
+// lines of context, for the pane's Code element to draw with its own gutters.
+type DiffLine = { sign: ' ' | '+' | '-'; line: string; i: number; j: number }
 
-function lineDiff(before: string, after: string): DiffLine[] | undefined {
-  const a = before.split('\n')
-  const b = after.split('\n')
+function unifiedDiff(before: string, after: string): string | undefined {
+  // Code takes tab and newline as its only control characters.
+  const clean = (t: string) => t.replace(/[^\t\n\P{Cc}]/gu, '').split('\n')
+  const a = clean(before)
+  const b = clean(after)
   if (a.length * b.length > 2_000_000) return undefined
   // lcs[i * w + j]: the longest common run of a[i..] and b[j..].
   const w = b.length + 1
@@ -168,22 +194,38 @@ function lineDiff(before: string, after: string): DiffLine[] | undefined {
   let j = 0
   while (i < a.length || j < b.length) {
     if (i < a.length && j < b.length && a[i] === b[j]) {
-      all.push({ sign: ' ', line: a[i]! })
+      all.push({ sign: ' ', line: a[i]!, i, j })
       i++
       j++
     } else if (j < b.length && (i === a.length || at(i, j + 1) >= at(i + 1, j))) {
-      all.push({ sign: '+', line: b[j++]! })
+      all.push({ sign: '+', line: b[j]!, i, j })
+      j++
     } else {
-      all.push({ sign: '-', line: a[i++]! })
+      all.push({ sign: '-', line: a[i]!, i, j })
+      i++
     }
   }
   const near = all.map((_, k) => all.slice(Math.max(0, k - 2), k + 3).some(x => x.sign !== ' '))
-  const out: DiffLine[] = []
-  all.forEach((x, k) => {
-    if (near[k]) out.push(x)
-    else if (out.length > 0 && out[out.length - 1]!.sign !== '…') out.push({ sign: '…', line: '' })
-  })
-  return out
+  const hunks: string[] = []
+  for (let k = 0; k < all.length; ) {
+    if (!near[k]) {
+      k++
+      continue
+    }
+    const start = k
+    while (k < all.length && near[k]) k++
+    const run = all.slice(start, k)
+    const old = run.filter(x => x.sign !== '+').length
+    const neu = run.filter(x => x.sign !== '-').length
+    const first = run[0]!
+    hunks.push(
+      [
+        `@@ -${old ? first.i + 1 : first.i},${old} +${neu ? first.j + 1 : first.j},${neu} @@`,
+        ...run.map(x => `${x.sign}${x.line}`),
+      ].join('\n'),
+    )
+  }
+  return hunks.join('\n')
 }
 
 // ---- module state; a reload starts it over (the pane's data lives in $.state)
@@ -221,19 +263,21 @@ async function countFiles($: EngineInterface, dir: string) {
   fileCount = highest
 }
 
+// Never throws: a log that cannot be written must not cost the pane its rows.
 async function writeLog($: EngineInterface, name: string, head: string, text: string) {
   if (!isLogging) return
-  const dir = await dirs($)
-  if (fileCount === undefined) {
-    counting ??= countFiles($, dir)
-    await counting
-  }
-  fileCount = (fileCount ?? 0) + 1
-  const file = `${dir}/${String(fileCount).padStart(4, '0')}-${fileSafe(name)}.md`
+  let file = name
   try {
+    const dir = await dirs($)
+    if (fileCount === undefined) {
+      counting ??= countFiles($, dir)
+      await counting
+    }
+    fileCount = (fileCount ?? 0) + 1
+    file = `${dir}/${String(fileCount).padStart(4, '0')}-${fileSafe(name)}.md`
     await $.fs.write(file, `${head}\n\n${text}\n`)
   } catch (err) {
-    await $.ui.log(`prompt-glimpse: could not write ${file}: ${String(err)}`)
+    void $.ui.log(`prompt-glimpse: could not write the log file ${file}: ${String(err)}`)
   }
 }
 
@@ -255,7 +299,11 @@ async function recordPrompt(
   if (sig === lastPromptSig) return
   lastPromptSig = sig
   const at = now()
-  const items = sections.map((s, i) => ({ key: s.id, text: s.text, meta: `${s.scope} · ${tokens(s.text.length)} · #${i + 1}` }))
+  const items = sections.map((s, i) => ({
+    key: s.id,
+    text: s.text,
+    meta: `${s.scope} · #${i + 1}`,
+  }))
   await update($, system, previous => buildVersion(previous, 'system', items, prov, showDiff, at))
   await update($, traits, () => [...e.traits])
   const model = e.promptModel === e.model ? e.model : `${e.model} (prompt of ${e.promptModel})`
@@ -281,7 +329,7 @@ async function recordContext($: EngineInterface, blocks: readonly { name: string
   if (sig === lastContextSig) return
   lastContextSig = sig
   const at = now()
-  const items = blocks.map(b => ({ key: b.name, text: b.text, meta: tokens(b.text.length) }))
+  const items = blocks.map(b => ({ key: b.name, text: b.text, meta: '' }))
   await update($, context, previous => buildVersion(previous, 'context', items, prov, showDiff, at))
   await writeLog(
     $,
@@ -298,61 +346,87 @@ async function recordContext($: EngineInterface, blocks: readonly { name: string
 }
 
 // Reminders arrive in bursts (one request carries many), each from its own
-// dispatch. Writing each with its own update made them fight over the value
-// until the engine gave up, so they queue here and one loop writes them all.
-type Pending = { type: string; agentId?: string; origin: string; text: string; by: string[]; dropped?: string; at: string }
+// dispatch, and a dispatch reads $.state at one fixed moment: a hook that
+// read-modify-writes the list never sees what the others wrote meanwhile, so
+// rows were lost (or the engine gave up retrying). The list therefore lives
+// here in the module, the one source of truth, and is written whole with
+// $.state.set, which needs no read; one loop writes each burst.
+type Pending = {
+  type: string
+  agentId?: string
+  origin: string
+  text: string
+  by: string[]
+  dropped?: string
+  at: string
+}
 
 let pending: Pending[] = []
 let flushing: Promise<void> | undefined
+let reminderList: Entry[] = []
+let turnNo = 0
+let loading: Promise<void> | undefined
+
+// After a reload the module starts empty; pick the pane's data back up once.
+async function loadMirror($: EngineInterface) {
+  loading ??= (async () => {
+    // Entries from before keys were hashed carry their whole text; drop them.
+    reminderList = (await read($, reminders)).filter(x => x.key.length <= 200)
+    turnNo = Math.max(turnNo, (await read($, turns)).at(-1)?.n ?? 0)
+  })()
+  await loading
+}
+
+function mergeReminders(batch: Pending[], turn: number): Pending[] {
+  const added: Pending[] = []
+  for (const p of batch) {
+    const key = `reminder:${p.type}:${p.agentId ?? ''}:${p.dropped ? 'dropped' : ''}:${hash(p.text)}`
+    const k = reminderList.findIndex(x => x.key === key)
+    if (k >= 0) {
+      const x = reminderList[k]!
+      const seen = x.turns ?? []
+      reminderList[k] = {
+        ...x,
+        count: x.count + 1,
+        lastAt: p.at,
+        turns: seen[seen.length - 1] === turn ? seen : [...seen, turn].slice(-50),
+      }
+      continue
+    }
+    added.push(p)
+    reminderList.push({
+      key,
+      label: p.type,
+      meta: [p.origin === 'engine' ? '' : p.origin, agentTag(p.agentId)].filter(Boolean).join(' · '),
+      text: p.text,
+      at: p.at,
+      lastAt: p.at,
+      count: 1,
+      by: p.by.length > 0 ? p.by : undefined,
+      gone: p.dropped,
+      turns: [turn],
+    })
+  }
+  reminderList = reminderList.slice(-MAX_REMINDERS)
+  return added
+}
 
 async function flushReminders($: EngineInterface) {
   while (pending.length > 0) {
     const batch = pending
     pending = []
-    const known = await read($, turns)
-    const turn = known.at(-1)?.n ?? 0
-    let added: Pending[] = []
-    await update($, reminders, list => {
-      added = []
-      const next = [...list]
-      for (const p of batch) {
-        const key = `reminder:${p.type}:${p.agentId ?? ''}:${p.dropped ?? ''}:${p.text}`
-        const k = next.findIndex(x => x.key === key)
-        if (k >= 0) {
-          const x = next[k]!
-          const seen = x.turns ?? []
-          next[k] = {
-            ...x,
-            count: x.count + 1,
-            lastAt: p.at,
-            turns: seen[seen.length - 1] === turn ? seen : [...seen, turn].slice(-50),
-          }
-          continue
-        }
-        added.push(p)
-        const where = p.agentId ? ` · agent ${p.agentId}` : ''
-        next.push({
-          key,
-          label: p.type,
-          meta: `${p.origin}${where} · ${tokens(p.text.length)}`,
-          text: p.text,
-          at: p.at,
-          lastAt: p.at,
-          count: 1,
-          by: p.by.length > 0 ? p.by : undefined,
-          gone: p.dropped,
-          turns: [turn],
-        })
-      }
-      return next.slice(-MAX_REMINDERS)
-    })
+    const turn = turnNo
+    const added = mergeReminders(batch, turn)
+    await $.state.set({ plugin: 'prompt-glimpse', key: 'reminders' }, reminderList)
     for (const p of added) {
       const where = p.agentId ? ` · agent ${p.agentId}` : ''
       const how = [...p.by, ...(p.dropped ? [p.dropped] : [])].join(', ')
       await writeLog(
         $,
         `reminder-${p.type}`,
-        `# Reminder: ${p.type}\n\n${p.at} · turn ${turn} · ${p.origin}${where}${how ? ` · ${how}` : ''}`,
+        `# Reminder: ${p.type}
+
+${p.at} · turn ${turn} · ${p.origin}${where}${how ? ` · ${how}` : ''}`,
         p.text,
       )
     }
@@ -360,23 +434,26 @@ async function flushReminders($: EngineInterface) {
 }
 
 async function queueReminder($: EngineInterface, p: Pending) {
+  await loadMirror($)
   pending.push(p)
-  flushing ??= flushReminders($).finally(() => {
-    flushing = undefined
-  })
-  await flushing
+  // Loop, so an entry queued just as a flush finished is not left waiting
+  // for the next reminder to come along.
+  while (pending.length > 0 || flushing !== undefined) {
+    flushing ??= flushReminders($).finally(() => {
+      flushing = undefined
+    })
+    await flushing
+  }
 }
 
 let awaitingStart = false
 
 async function startTurn($: EngineInterface, text: string) {
   try {
-    const at = now()
-    await update($, turns, list => {
-      const n = (list.at(-1)?.n ?? 0) + 1
-      const turn: Turn = { n, at, text: text.replace(/\s+/g, ' ').slice(0, 80) }
-      return [...list, turn].slice(-MAX_TURNS)
-    })
+    await loadMirror($)
+    turnNo += 1
+    const turn: Turn = { n: turnNo, at: now(), text: text.replace(/\s+/g, ' ').slice(0, 80) }
+    await update($, turns, list => [...list.filter(t => t.n < turn.n), turn].slice(-MAX_TURNS))
   } catch (err) {
     await $.ui.log(`prompt-glimpse: could not number the turn: ${String(err)}`)
   }
@@ -418,6 +495,13 @@ async function exportSnapshot($: EngineInterface) {
   } catch (err) {
     $.ui.toast(`Could not write the snapshot: ${String(err)}`)
   }
+}
+
+async function resetPane($: EngineInterface) {
+  reminderList = []
+  await $.state.set({ plugin: 'prompt-glimpse', key: 'reminders' }, [])
+  await $.state.set({ plugin: 'prompt-glimpse', key: 'open' }, [])
+  await $.state.set({ plugin: 'prompt-glimpse', key: 'tab' }, 'system')
 }
 
 // ---- hooks -------------------------------------------------------------------
@@ -522,160 +606,288 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
-    const opened = new Set(await read($, open))
-    const shownTraits = await read($, traits)
-    const shownHeader = await read($, header)
-    const current = await read($, tab)
-    const turnList = await read($, turns)
-    const byGroup: Record<Exclude<Group, 'turns'>, Entry[]> = {
-      system: await read($, system),
-      context: await read($, context),
-      reminders: await read($, reminders),
-    }
-    const toggle = (key: string) => () =>
-      void update($, open, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
-    const pick = (group: Group) => () => void update($, tab, () => group)
-    const collapseAll = () => void update($, open, () => [])
-    const sent = (xs: Entry[]) => xs.filter(x => x.gone === undefined)
-    const chars = (xs: Entry[]) => sent(xs).reduce((n, x) => n + x.text.length, 0)
-    const lastTurn = turnList.at(-1)?.n ?? 0
-    const inTurn = (n: number) => byGroup.reminders.filter(x => (x.turns ?? [0]).includes(n))
-    const counts: Record<Group, string> = {
-      system: tokens(chars(byGroup.system)),
-      context: tokens(chars(byGroup.context)),
-      reminders: String(byGroup.reminders.length),
-      turns: String(turnList.length),
-    }
-
-    // One row: a header button that opens it, and when open its text (or its
-    // diff), a copy button and a closing button at the end of a long one.
-    const row = (x: Entry, rowKey: string, largest: number, indent: number, showTurns: boolean) => {
-      const isOpen = opened.has(rowKey)
-      const isDiff = opened.has(`diff:${rowKey}`)
-      const lines = x.text.split('\n')
-      const shown = lines.slice(0, MAX_SHOWN_LINES).join('\n')
-      const seen = showTurns
-        ? x.count > 1
-          ? ` · ×${x.count}, ${clock(x.at)}–${clock(x.lastAt)}`
-          : ` · ${clock(x.at)}`
-        : ''
-      const notes = [...(x.by ?? []), ...(x.gone ? [x.gone] : []), ...(x.prevText !== undefined ? [`changed ${clock(x.at)}`] : [])]
-      const diff = isDiff && x.prevText !== undefined ? lineDiff(x.prevText, x.text) : undefined
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button } = elements
+    // Code draws a framed, monospaced block (and a real diff); a surface
+    // without it gets plain text.
+    const Code = 'Code' in elements ? elements.Code : undefined
+    // A drawing that throws would leave the pane blank with no word why; draw
+    // the error instead, with a way out if the stored data is what breaks it.
+    try {
+      return await drawPane()
+    } catch (err) {
+      void $.ui.log(`prompt-glimpse: could not draw the pane: ${String(err)}`)
       return (
-        <Box key={rowKey} flexDirection="column" paddingLeft={indent}>
-          <Button key={`row:${rowKey}`} onPress={toggle(rowKey)}>
-            {isOpen ? '▾' : '▸'} <Text dimColor>{bar(x.gone ? 0 : x.text.length, largest)}</Text>{' '}
-            <Text strikethrough={x.gone !== undefined}>{x.label}</Text>{' '}
-            <Text dimColor>
-              {x.meta}
-              {seen}
-            </Text>
-            {notes.length > 0 && <Text color="warning"> · {notes.join(' · ')}</Text>}
+        <Box flexDirection="column">
+          <Text color="error">prompt-glimpse could not draw: {String(err)}</Text>
+          <Button key="reset" onPress={() => void resetPane($)}>
+            Clear the pane's data
           </Button>
-          {isOpen && (
-            <Box paddingLeft={2} flexDirection="column">
-              <Box flexDirection="row" gap={1}>
-                <Button key={`copy:${rowKey}`} onPress={press => void $.ui.copy({ text: x.text, surface: press.surface })}>
-                  copy
-                </Button>
-                {x.prevText !== undefined && (
-                  <Button key={`diffbtn:${rowKey}`} onPress={toggle(`diff:${rowKey}`)}>
-                    {isDiff ? 'show text' : `show change since ${clock(x.prevAt ?? x.at)}`}
-                  </Button>
-                )}
-              </Box>
-              {isDiff && x.prevText !== undefined ? (
-                diff === undefined ? (
-                  <Text dimColor>too long to diff here; both versions are in the debug log</Text>
-                ) : (
-                  <Box flexDirection="column">
-                    {diff.map((d, k) => (
-                      <Text
-                        key={`d${k}`}
-                        color={d.sign === '+' ? 'success' : d.sign === '-' ? 'error' : undefined}
-                        dimColor={d.sign === ' ' || d.sign === '…'}
-                      >
-                        {d.sign === '…' ? '  …' : `${d.sign} ${d.line}`}
-                      </Text>
-                    ))}
-                  </Box>
-                )
-              ) : (
-                <Text>{shown}</Text>
-              )}
-              {!isDiff && lines.length > MAX_SHOWN_LINES && (
-                <Text dimColor>… {lines.length - MAX_SHOWN_LINES} more lines (copy it, or see the debug log)</Text>
-              )}
-              {lines.length > FOOTER_AFTER_LINES && (
-                <Button key={`end:${rowKey}`} onPress={toggle(rowKey)}>
-                  ▴ collapse {x.label}
-                </Button>
-              )}
-            </Box>
-          )}
         </Box>
       )
     }
 
-    const body = () => {
-      if (current === 'turns') {
-        const shownTurns = turnList.slice(-SHOWN_TURNS)
-        const early = inTurn(0)
-        if (shownTurns.length === 0 && early.length === 0) return <Text dimColor>no turns yet</Text>
-        const groups: { n: number; label: string; xs: Entry[] }[] = [
-          ...(early.length > 0 ? [{ n: 0, label: 'before the first numbered turn', xs: early }] : []),
-          ...shownTurns.map(t => ({ n: t.n, label: `${clock(t.at)} ${t.text ? `“${t.text}”` : '(no typed prompt)'}`, xs: inTurn(t.n) })),
-        ]
-        return groups.map(g => {
-          const key = `turn:${g.n}`
-          const isOpen = opened.has(key)
-          const size = chars(g.xs)
-          const largest = Math.max(1, ...g.xs.map(x => x.text.length))
-          return (
-            <Box key={key} flexDirection="column">
-              <Button key={`row:${key}`} onPress={toggle(key)}>
-                {isOpen ? '▾' : '▸'} turn {g.n} <Text dimColor>· {g.label} · {g.xs.length} reminders · {tokens(size)}</Text>
-              </Button>
-              {isOpen && g.xs.map(x => row(x, `${key}:${x.key}`, largest, 2, false))}
-            </Box>
-          )
-        })
+    async function drawPane() {
+      const opened = new Set(await read($, open))
+      const shownTraits = await read($, traits)
+      const shownHeader = await read($, header)
+      const current = await read($, tab)
+      const turnList = await read($, turns)
+      const byGroup: Record<Exclude<Group, 'turns'>, Entry[]> = {
+        system: await read($, system),
+        context: await read($, context),
+        reminders: await read($, reminders),
       }
-      const entries = byGroup[current]
-      if (entries.length === 0) return <Text dimColor>nothing yet</Text>
-      const largest = Math.max(1, ...entries.map(x => x.text.length))
-      return entries.map(x => row(x, x.key, largest, 0, current === 'reminders'))
-    }
+      const toggle = (key: string) => () =>
+        void update($, open, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
+      const pick = (group: Group) => () => void update($, tab, () => group)
+      const collapseAll = () => void update($, open, () => [])
+      const sent = (xs: Entry[]) => xs.filter(x => x.gone === undefined)
+      const chars = (xs: Entry[]) => sent(xs).reduce((n, x) => n + x.text.length, 0)
+      const lastTurn = turnList.at(-1)?.n ?? 0
+      const inTurn = (n: number) => byGroup.reminders.filter(x => (x.turns ?? [0]).includes(n))
+      // Reminders of one type, in order of first appearance: a type whose text
+      // changes every turn (the token countdown) is one row, not forty.
+      const kinds = (() => {
+        const m = new Map<string, Entry[]>()
+        for (const x of byGroup.reminders) m.set(x.label, [...(m.get(x.label) ?? []), x])
+        return [...m].map(([label, xs]) => ({ label, xs }))
+      })()
+      const counts: Record<Group, string> = {
+        system: tokens(chars(byGroup.system)).replace(' tok', ''),
+        context: tokens(chars(byGroup.context)).replace(' tok', ''),
+        reminders: String(kinds.length),
+        turns: String(turnList.length),
+      }
+      const span = (from: string, to: string) => (clock(from) === clock(to) ? clock(from) : `${clock(from)}–${clock(to)}`)
 
-    const summary =
-      current === 'turns'
-        ? `${turnList.length} turns on the main loop; turn ${lastTurn}'s reminders ${tokens(chars(inTurn(lastTurn)))}`
-        : `${sent(byGroup[current]).length} sent, ${tokens(chars(byGroup[current]))}`
-
-    return (
-      <Box flexDirection="column">
-        <Box flexDirection="row" gap={1}>
-          {(Object.keys(TITLES) as Group[]).map(group => (
-            <Button key={`tab:${group}`} variant={group === current ? 'primary' : undefined} onPress={pick(group)}>
-              {TITLES[group]} {counts[group]}
+      // The one line every row starts with: a small toggle, the size bar, the
+      // name, then the quiet details and any notes. Only the toggle is a
+      // button, so the list reads as a list and not as a wall of buttons.
+      const headLine = (spec: {
+        rowKey: string
+        size: number
+        label: string
+        meta: string
+        notes?: string[]
+        quote?: string
+        gone?: boolean
+        mono?: boolean
+      }) => {
+        const filled = bar(spec.gone ? 0 : spec.size)
+        const lit = filled.replace(/·/g, '')
+        return (
+          <Box flexDirection="row" gap={1}>
+            <Button key={`row:${spec.rowKey}`} plain dimColor onPress={toggle(spec.rowKey)}>
+              {opened.has(spec.rowKey) ? '▾' : '▸'}
             </Button>
-          ))}
+            <Text>
+              <Text mono color={spec.gone ? 'inactive' : 'claude'}>
+                {'━'.repeat(lit.length)}
+              </Text>
+              <Text mono color="subtle">
+                {'━'.repeat(BAR_STEPS.length - lit.length)}
+              </Text>{' '}
+              <Text weight="medium" mono={spec.mono} strikethrough={spec.gone} dimColor={spec.gone}>
+                {spec.label}
+              </Text>
+              {spec.quote !== undefined && (
+                <Text italic dimColor>
+                  {' '}
+                  {spec.quote}
+                </Text>
+              )}
+              <Text size="footnote" dimColor tabular>
+                {'  '}
+                {spec.meta}
+              </Text>
+              {spec.notes && spec.notes.length > 0 && (
+                <Text size="footnote" color="warning">
+                  {'  '}
+                  {spec.notes.join(' · ')}
+                </Text>
+              )}
+            </Text>
+          </Box>
+        )
+      }
+
+      // An open row's body: its actions, then its text (or the change) framed.
+      const bodyOf = (x: Entry, rowKey: string, indent: number) => {
+        const isDiff = opened.has(`diff:${rowKey}`) && x.prevText !== undefined
+        const lines = x.text.split('\n')
+        const shown = lines.slice(0, MAX_SHOWN_LINES).join('\n')
+        const diff = isDiff ? unifiedDiff(x.prevText ?? '', x.text) : undefined
+        return (
+          <Box flexDirection="column" paddingLeft={indent + 3} marginBottom={1}>
+            <Box flexDirection="row" gap={1}>
+              <Button key={`copy:${rowKey}`} dimColor onPress={press => void $.ui.copy({ text: x.text, surface: press.surface })}>
+                Copy
+              </Button>
+              {x.prevText !== undefined && (
+                <Button key={`diffbtn:${rowKey}`} dimColor onPress={toggle(`diff:${rowKey}`)}>
+                  {isDiff ? 'Show text' : `Changes since ${clock(x.prevAt ?? x.at)}`}
+                </Button>
+              )}
+            </Box>
+            {isDiff ? (
+              diff === undefined ? (
+                <Text size="footnote" dimColor>
+                  Too long to diff here; both versions are in the debug log.
+                </Text>
+              ) : Code ? (
+                <Code source={diff} format="diff" />
+              ) : (
+                <Text>{diff}</Text>
+              )
+            ) : Code ? (
+              <Code source={shown.replace(/[^\t\n\P{Cc}]/gu, '')} language="markdown" />
+            ) : (
+              <Text>{shown}</Text>
+            )}
+            {!isDiff && lines.length > MAX_SHOWN_LINES && (
+              <Text size="footnote" dimColor>
+                … {lines.length - MAX_SHOWN_LINES} more lines (copy it, or see the debug log)
+              </Text>
+            )}
+            {lines.length > FOOTER_AFTER_LINES && (
+              <Button key={`end:${rowKey}`} dimColor onPress={toggle(rowKey)}>
+                ▴ Collapse {x.label}
+              </Button>
+            )}
+          </Box>
+        )
+      }
+
+      const notesOf = (x: Entry) => [
+        ...(x.by ?? []),
+        ...(x.gone ? [x.gone] : []),
+        ...(x.prevText !== undefined ? [`changed ${clock(x.at)}`] : []),
+      ]
+
+      const row = (x: Entry, rowKey: string, indent: number, how: { label?: string; mono?: boolean; seen?: boolean }) => (
+        <Box key={rowKey} flexDirection="column" paddingLeft={indent}>
+          {headLine({
+            rowKey,
+            size: x.text.length,
+            label: how.label ?? x.label,
+            mono: how.mono,
+            gone: x.gone !== undefined,
+            meta: [
+              tokens(x.text.length),
+              how.seen && x.count > 1 ? `×${x.count}` : '',
+              how.seen ? span(x.at, x.lastAt) : '',
+              tidy(x.meta),
+            ]
+              .filter(Boolean)
+              .join(' · '),
+            notes: notesOf(x),
+          })}
+          {opened.has(rowKey) && bodyOf(x, rowKey, indent)}
         </Box>
-        <Box flexDirection="row" gap={1}>
-          <Button key="collapse-all" onPress={collapseAll}>
-            Collapse all
-          </Button>
-          <Button key="export" onPress={() => void exportSnapshot($)}>
-            Export snapshot
-          </Button>
+      )
+
+      const body = () => {
+        if (current === 'turns') {
+          const shownTurns = turnList.slice(-SHOWN_TURNS)
+          const early = inTurn(0)
+          if (shownTurns.length === 0 && early.length === 0) return <Text dimColor>No turns yet.</Text>
+          const groups: { n: number; label: string; at?: string; quote?: string; xs: Entry[] }[] = [
+            ...(early.length > 0 ? [{ n: 0, label: 'Before the first turn', xs: early }] : []),
+            ...shownTurns.map(t => ({
+              n: t.n,
+              label: `Turn ${t.n}`,
+              at: t.at,
+              quote: t.text ? `“${t.text}”` : undefined,
+              xs: inTurn(t.n),
+            })),
+          ]
+          return groups.map(g => {
+            const key = `turn:${g.n}`
+            return (
+              <Box key={key} flexDirection="column">
+                {headLine({
+                  rowKey: key,
+                  size: chars(g.xs),
+                  label: g.label,
+                  quote: g.quote,
+                  meta: [g.at ? clock(g.at) : '', `${g.xs.length} reminders`, tokens(chars(g.xs))].filter(Boolean).join(' · '),
+                })}
+                {opened.has(key) && g.xs.map(x => row(x, `${key}:${x.key}`, 3, {}))}
+              </Box>
+            )
+          })
+        }
+        if (current === 'reminders') {
+          if (kinds.length === 0) return <Text dimColor>Nothing yet.</Text>
+          return kinds.map(({ label, xs }) => {
+            if (xs.length === 1) return row(xs[0]!, xs[0]!.key, 0, { seen: true })
+            const key = `kind:${label}`
+            const newest = [...xs].sort((p, q) => q.lastAt.localeCompare(p.lastAt))
+            const latest = newest[0]!
+            const total = xs.reduce((n, x) => n + x.count, 0)
+            const first = xs.reduce((m, x) => (x.at < m ? x.at : m), latest.at)
+            return (
+              <Box key={key} flexDirection="column">
+                {headLine({
+                  rowKey: key,
+                  size: latest.text.length,
+                  label,
+                  meta: [tokens(latest.text.length), `×${total}`, `${xs.length} versions`, span(first, latest.lastAt)].join(' · '),
+                  notes: [...new Set(xs.flatMap(notesOf))],
+                })}
+                {opened.has(key) &&
+                  newest.map(x => row(x, `${key}:${x.key}`, 3, { label: peek(x.text), mono: true, seen: true }))}
+              </Box>
+            )
+          })
+        }
+        const entries = byGroup[current]
+        if (entries.length === 0) return <Text dimColor>Nothing yet.</Text>
+        return entries.map(x => row(x, x.key, 0, {}))
+      }
+
+      const summary =
+        current === 'turns'
+          ? `${turnList.length} turns · turn ${lastTurn} carried ${tokens(chars(inTurn(lastTurn)))} of reminders`
+          : current === 'reminders'
+            ? `${kinds.length} kinds · ${byGroup.reminders.length} distinct texts · oldest first`
+            : `${sent(byGroup[current]).length} sent · ${tokens(chars(byGroup[current]))}`
+      const [model, ...rest] = (shownHeader || 'model not seen yet').split(' · ')
+
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="column" marginBottom={1}>
+            <Text size="heading" weight="semibold">
+              {model}
+            </Text>
+            <Text size="footnote" dimColor>
+              {[...rest, ...(shownTraits.length ? [shownTraits.join(', ')] : [])].join(' · ')}
+            </Text>
+          </Box>
+          <Box flexDirection="row" flexWrap="wrap" gap={1}>
+            {(Object.keys(TITLES) as Group[]).map(group => (
+              <Button key={`tab:${group}`} variant={group === current ? 'primary' : undefined} onPress={pick(group)}>
+                {`${TITLES[group]} ${counts[group]}`}
+              </Button>
+            ))}
+          </Box>
+          <Box flexDirection="row" flexWrap="wrap" gap={1} marginTop={1} marginBottom={1}>
+            <Box flexGrow={1}>
+              <Text size="footnote" dimColor>
+                {summary}
+              </Text>
+            </Box>
+            <Button key="collapse-all" dimColor onPress={collapseAll}>
+              Collapse all
+            </Button>
+            <Button key="export" dimColor onPress={() => void exportSnapshot($)}>
+              Export
+            </Button>
+          </Box>
+          {body()}
         </Box>
-        <Text dimColor>
-          {TITLES[current]}: {summary} · {shownHeader || 'model not seen yet'} · traits{' '}
-          {shownTraits.length ? shownTraits.join(', ') : '(none yet)'}
-        </Text>
-        {body()}
-      </Box>
-    )
+      )
+    }
   })
 }

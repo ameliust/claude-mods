@@ -1,6 +1,6 @@
 {
   "name": "prompt-glimpse",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read-only pane showing the system prompt sections, context blocks and system reminders Claude is actually sent, with an optional on-disk debug log",
   "types": "./types/index.d.ts",
   "userConfig": {
