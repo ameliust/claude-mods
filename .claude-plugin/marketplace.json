@@ -9,6 +9,10 @@
       "source": "./recent-chats"
     },
     {
+      "name": "prompt-glimpse",
+      "source": "./prompt-glimpse"
+    },
+    {
       "name": "cc-redacted",
       "source": "./cc-redacted"
     }

@@ -1,0 +1,26 @@
+{
+  "name": "prompt-glimpse",
+  "version": "0.1.0",
+  "description": "Read-only pane showing the system prompt sections, context blocks and system reminders Claude is actually sent, with an optional on-disk debug log",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "debugLog": {
+      "type": "boolean",
+      "title": "Write debug log",
+      "description": "Also write every system prompt version, context block and reminder to files on disk",
+      "default": true
+    },
+    "showDiff": {
+      "type": "boolean",
+      "title": "Show changes",
+      "description": "Keep each section's and context block's previous text, so a changed row can show what changed; also keeps rows that stopped being sent",
+      "default": false
+    },
+    "logDir": {
+      "type": "string",
+      "title": "Log folder",
+      "description": "Where the debug log goes; empty means ~/.claude/prompt-glimpse-logs",
+      "default": ""
+    }
+  }
+}

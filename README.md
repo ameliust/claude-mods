@@ -13,6 +13,24 @@ Notes:
 
 Status: early prototype.
 
+## prompt-glimpse
+
+A read-only window onto what Claude is actually sent. A pane groups it four ways: the system prompt section by section (each section's id, cache scope and size, from `prompt.compose`), the context blocks the first message carries (`prompt.context`), every system reminder or other injected attachment (`prompt.attachment`, the text inside the `<system-reminder>` wrapper), and the reminders grouped by the turn that carried them. Tabs at the top switch groups, and every row starts collapsed: press a row to expand it, copy it, or close it again from its end. Sizes are estimated tokens (about four characters each), with a small bar against the largest row in view. Reminders with the same type and text show as one row with a count, oldest first. The header shows the model, the number of tools and the prompt's traits, such as `lean` or `bare`. `/prompt-glimpse` reopens the pane.
+
+Each row also says which plugin changed it on its way out, for example `edited by cc-redacted`. Rows another plugin removed stay in the list, struck through, as `removed by …`. The mod reads this from the hook chain beneath it, so it sees only plugins loaded inside it. Load prompt-glimpse first (with `--plugin-dir`, the first folder named is the outermost) to see every change.
+
+With the `showDiff` option on (off by default), each section and context block keeps the text it had before its latest change. A changed row then offers "show change since …", a line diff. Rows that stopped being sent stay listed as `not sent since …`.
+
+**Export snapshot** writes the whole effective prompt to one Markdown file in the log folder: every section, context block, the latest turn's reminders and a list of every distinct reminder.
+
+With the `debugLog` option on (the default for now), each new system prompt version, each context block set and each reminder is also written as its own numbered Markdown file under `~/.claude/prompt-glimpse-logs/<session id>/`. Numbering continues across reloads. The `logDir` option changes the folder.
+
+The pane's data lives in the session's memory: it survives a reload of the mod and is gone when the session ends. Only the log and the snapshots are written to disk.
+
+The mod never changes what is sent: every hook passes the engine's answer through untouched.
+
+Status: early prototype.
+
 ## cc-redacted
 
 Takes identifying details out of what Claude is sent, for experiment runs (pilots, evals) that need a clean, sensitive-detail-free context. It changes only the text Claude reads; the tools, the working directory and everything else still behave as usual. Each part is an option:
@@ -32,12 +50,15 @@ For a print run, load it from its folder and pass options through `--settings`. 
 claude -p --setting-sources project,local --strict-mcp-config --plugin-dir ./cc-redacted --settings '{"pluginConfigs":{"cc-redacted":{"options":{"auditFile":"/abs/path/audit.txt"}}}}' "your prompt"
 ```
 
+Load `prompt-glimpse` beside it to check the result. Name prompt-glimpse's folder first (`--plugin-dir ./prompt-glimpse --plugin-dir ./cc-redacted`): it then shows what is really sent, with each removal tagged `removed by cc-redacted`. Named second, it sits beneath cc-redacted and shows the text before redaction.
+
 Status: early prototype.
 
 ## Install
 
 ```
 /plugin install recent-chats --marketplace ameliust/claude-mods
+/plugin install prompt-glimpse --marketplace ameliust/claude-mods
 /plugin install cc-redacted --marketplace ameliust/claude-mods
 ```
 
