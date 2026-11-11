@@ -7,8 +7,8 @@
     "debugLog": {
       "type": "boolean",
       "title": "Write debug log",
-      "description": "Also write every system prompt version, context block and reminder to files on disk",
-      "default": true
+      "description": "Also write every system prompt version, context block and reminder to files on disk. They hold everything Claude is sent, CLAUDE.md and context included, and are not cleaned up",
+      "default": false
     },
     "showDiff": {
       "type": "boolean",

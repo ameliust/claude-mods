@@ -23,7 +23,7 @@ With the `showDiff` option on (off by default), each section and context block k
 
 **Export** writes the whole effective prompt to one Markdown file in the log folder: every section, context block, the latest turn's reminders and a list of every distinct reminder.
 
-With the `debugLog` option on (the default for now), each new system prompt version, each context block set and each reminder is also written as its own numbered Markdown file under `~/.claude/prompt-glimpse-logs/<session id>/`. Numbering continues across reloads. The `logDir` option changes the folder.
+With the `debugLog` option on (off by default), each new system prompt version, each context block set and each reminder is also written as its own numbered Markdown file under `~/.claude/prompt-glimpse-logs/<session id>/`. Numbering continues across reloads. The `logDir` option changes the folder. The files hold everything Claude is sent, your CLAUDE.md and context blocks included, and nothing deletes them.
 
 The pane's data lives in the session's memory: it survives a reload of the mod and is gone when the session ends. Only the log and the snapshots are written to disk.
 
